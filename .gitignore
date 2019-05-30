@@ -1,0 +1,26 @@
+# IDEA
+*.iml
+/.idea/
+/out/
+
+# Eclipse
+.settings/
+.classpath
+.project
+
+# Maven
+target/
+
+# Compiled class files
+*.class
+
+# Log Files
+*.log
+
+# Package Files
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+*.rar
