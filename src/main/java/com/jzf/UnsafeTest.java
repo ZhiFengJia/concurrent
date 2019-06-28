@@ -75,7 +75,6 @@ public class UnsafeTest {
         unsafe.freeMemory(address);//释放指定地址的内存
 
         logger.info("---class initialized---");
-
         Field f1 = MyObj.class.getDeclaredField("f1");
         long f1Offset = unsafe.staticFieldOffset(f1);
         int f1Val = unsafe.getInt(MyObj.class, f1Offset);
