@@ -6,3 +6,4 @@
 4. ReentrantLock
 4. Unsafe
 5. AbstractQueuedSynchronizer
+6. DistributedLock

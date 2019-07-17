@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration scan="true" scanPeriod="60 seconds" debug="false">
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%-25thread] %-5level %logger{36} - %msg%n</pattern>
+            <charset>utf8</charset>
+        </encoder>
+    </appender>
+
+    <logger name="com.jzf" level="INFO" />
+
+    <!--指定最基础的日志输出级别-->
+    <root level="ERROR">
+        <!--appender将会添加到这个loger-->
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+</configuration>
