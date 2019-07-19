@@ -22,38 +22,86 @@ import java.util.stream.Collectors;
 
 public class DistributedLockTest {
     private static final Logger logger = LoggerFactory.getLogger(DistributedLockTest.class);
-    private static int count = 1000;
+    /**
+     * 需要使用多少个线程测试分布式锁
+     */
+    private static final int THREAD_NUMBER = 10;
+    /**
+     * 需要测试多少次加解锁操作
+     */
+    private static final int LOCK_NUMBER = 1000;
+    /**
+     * ZK服务器地址
+     */
+    private static final String ZK_SERVER = "192.168.2.14:2101,192.168.2.14:2102,192.168.2.14:2103";
+    /**
+     * 每次加解锁时count-1,程序执行完count=0表示正常
+     */
+    private static int count = LOCK_NUMBER;
 
     public static void main(String[] args) throws InterruptedException {
-        final int lockCount = count;
-        CountDownLatch cdl = new CountDownLatch(lockCount);
+        CountDownLatch cdl = new CountDownLatch(LOCK_NUMBER);
         ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(
-                10, 10,
+                THREAD_NUMBER, THREAD_NUMBER,
                 0L, TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(lockCount),
-                new DefaultThreadFactory("app-thread"),
+                new LinkedBlockingQueue<>(LOCK_NUMBER),
+                new DefaultThreadFactory("lock-pool", true),
                 new ThreadPoolExecutor.AbortPolicy());
 
-//        ReentrantLock lock = new ReentrantLock(true);
-        DistributedLock lock = new DistributedLock("192.168.2.11:2101,192.168.2.11:2102,192.168.2.11:2103");
 
-        long startTime = System.currentTimeMillis();
-        for (int i = 0; i < lockCount; i++) {
+//        CuratorFramework client = CuratorFrameworkFactory.newClient(ZK_SERVER,
+//                new ExponentialBackoffRetry(1000, 3));
+//        client.start();
+//        InterProcessMutex lock = new InterProcessMutex(client, "/locks");
+        DistributedLock lock = new DistributedLock(ZK_SERVER, "/locks");
+//        ReentrantLock lock = new ReentrantLock(true);
+
+
+        long startTime = System.nanoTime();
+        for (int i = 0; i < LOCK_NUMBER; i++) {
             threadPoolExecutor.execute(() -> {
                 try {
-                    lock.lock();
-                    lock.lock();// 测试锁可重入特性
-                    logger.info("{}", --count);
-                    cdl.countDown();
+                    lock.acquire();
+//                    lock.lock();// 测试锁可重入特性
+                    logger.info("count={}", --count);
+                } catch (Exception e) {
+                    e.printStackTrace();
                 } finally {
-                    lock.unlock();
-                    lock.unlock();
+//                    lock.unlock();
+//                    lock.unlock();
+                    try {
+                        lock.release();
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
                 }
+                cdl.countDown();
             });
         }
         cdl.await();
-        long endTime = System.currentTimeMillis();
-        logger.info("{}个锁总耗时:{}ms", lockCount, endTime - startTime);
+        long endTime = System.nanoTime();
+        statistics(startTime, endTime);
+    }
+
+    private static void statistics(long startTime, long endTime) {
+        long durationTime = endTime - startTime;
+        if (durationTime < 1000) {
+            logger.info("{}次加解锁总耗时:{}ns", LOCK_NUMBER, durationTime);
+        } else if (durationTime < 1000_000) {
+            logger.info("{}次加解锁总耗时:{}us", LOCK_NUMBER, durationTime / 1000);
+        } else {
+            logger.info("{}次加解锁总耗时:{}ms", LOCK_NUMBER, durationTime / 1000 / 1000);
+        }
+
+        durationTime = durationTime / LOCK_NUMBER;
+        if (durationTime < 1000) {
+            logger.info("平均加解锁耗时:{}ns", durationTime);
+
+        } else if (durationTime < 1000_000) {
+            logger.info("平均加解锁耗时:{}us", durationTime / 1000);
+        } else {
+            logger.info("平均加解锁耗时:{}ms", durationTime / 1000 / 1000);
+        }
     }
 }
 
@@ -62,16 +110,32 @@ public class DistributedLockTest {
  */
 class DistributedLock extends AbstractOwnableSynchronizer implements Lock {
     private static final Logger logger = LoggerFactory.getLogger(DistributedLock.class);
-    private static final int SESSION_TIMEOUT = 10 * 60 * 1000;//10分钟
-    // 根节点
-    private static final String ROOT_LOCK = "/lock";
-    private static final String LOCK_NAME = "app";
-    private static final String SPLIT_STR = "_lock_";
+    /**
+     * session超时时间:10分钟
+     */
+    private static final int SESSION_TIMEOUT = 10 * 60 * 1000;
+    /**
+     * 粗略估计自旋比使用parkNanos()快的纳秒数,在非常短的超时情况下提高响应能力.
+     */
+    private static final long spinForTimeoutThreshold = 1000L;
+    /**
+     * 锁名字
+     */
+    private static final String LOCK_NAME = "lock";
+    private static final String SPLIT_STR = "-";
     private ZooKeeper zk;
 
-    // 存储当前线程所拥有的锁
+    /**
+     * 锁所在路径
+     */
+    private String path;
+    /**
+     * 存储当前线程所拥有的锁
+     */
     private static final ThreadLocal<String> threadLocal = new ThreadLocal<>();
-    // 存储当前JVM中所有的锁和与之对应的线程
+    /**
+     * 存储当前JVM中所有的锁和与之对应的线程
+     */
     private static final ConcurrentSkipListMap<String, Thread> nodes = new ConcurrentSkipListMap<>(String::compareTo);
 
     /**
@@ -79,21 +143,209 @@ class DistributedLock extends AbstractOwnableSynchronizer implements Lock {
      */
     private volatile int state;
 
-    public DistributedLock(String connectString) {
-        // 连接zookeeper
+    public DistributedLock(String connectString, String path) {
+        this.path = path;
         try {
+            // 连接zookeeper
             this.zk = new ZooKeeper(connectString, SESSION_TIMEOUT, new NodeDeletedWatcher());
-            Stat stat = zk.exists(ROOT_LOCK, false);
+            Stat stat = zk.exists(path, false);
             if (stat == null) {
                 // 如果根节点不存在，则创建根节点
-                zk.create(ROOT_LOCK, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                zk.create(path, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
             }
         } catch (IOException | KeeperException | InterruptedException e) {
+            logger.error("创建zk连接异常");
             e.printStackTrace();
         } catch (Throwable e) {
-            logger.info("创建zk连接异常");
+            logger.error("创建zk未知异常");
             e.printStackTrace();
         }
+    }
+
+    /**
+     * Alias acquire();
+     */
+    @Override
+    public void lock() {
+        try {
+            acquire();
+        } catch (KeeperException | InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public void lockInterruptibly() throws InterruptedException {
+        try {
+            while (!tryAcquire(1)) {
+                LockSupport.park(this);
+                if (Thread.interrupted()) {
+                    throw new InterruptedException();
+                }
+            }
+        } catch (KeeperException e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public boolean tryLock() {
+        try {
+            return tryAcquire(1);
+        } catch (KeeperException | InterruptedException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    @Override
+    public boolean tryLock(long time, TimeUnit unit) throws InterruptedException {
+        long nanosTimeout = unit.toNanos(time);
+        if (nanosTimeout <= 0L)
+            return false;
+        final long deadline = System.nanoTime() + nanosTimeout;
+        try {
+            while (!tryAcquire(1)) {
+                nanosTimeout = deadline - System.nanoTime();
+                if (nanosTimeout <= 0L)
+                    return false;
+                if (nanosTimeout > spinForTimeoutThreshold)
+                    LockSupport.parkNanos(this, nanosTimeout);
+                if (Thread.interrupted()) {
+                    throw new InterruptedException();
+                }
+            }
+            return true;
+        } catch (KeeperException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    /**
+     * Alias release();
+     */
+    @Override
+    public void unlock() {
+        try {
+            release();
+        } catch (KeeperException | InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Alias unlock();
+     */
+    public void release() throws KeeperException, InterruptedException {
+        tryRelease(1);
+    }
+
+    /**
+     * Alias lock();
+     */
+    public void acquire() throws KeeperException, InterruptedException {
+        while (!tryAcquire(1)) {
+            LockSupport.park(this);
+        }
+    }
+
+    private boolean tryAcquire(int acquires) throws KeeperException, InterruptedException {
+        int c = getState();
+        if (isHeldExclusively()) {
+            // 这里是实现重入锁的关键.
+            int nextc = c + acquires;
+            if (nextc < 0)
+                throw new Error("Maximum lock count exceeded");
+            setState(nextc);
+            return true;
+        } else if (c == 0) {
+            // try to acquire normally
+            if (tryMultijVMAcquire() && compareAndSetState(0, acquires)) {
+                setExclusiveOwnerThread(Thread.currentThread());
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 看当前节点是否可以获取到锁
+     *
+     * @return
+     */
+    private boolean tryMultijVMAcquire() throws KeeperException, InterruptedException {
+        Thread currentThread = Thread.currentThread();
+        String currentLock = threadLocal.get();
+        if (currentLock == null ||
+                !nodes.containsKey(currentLock)) {// 表示threadLocal中存储的lock已经过期,需要重新创建锁
+            //如果当前线程没有创建过节点的话,就创建一个lock节点.
+            currentLock = zk.create(path + "/" + LOCK_NAME + SPLIT_STR, new byte[0],
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
+
+            currentLock = currentLock.substring(currentLock.lastIndexOf("/") + 1);
+            threadLocal.set(currentLock);
+            nodes.put(currentLock, currentThread);
+            logger.info("创建锁 {}", currentLock);
+        }
+
+        // 获取取所有子节点,取出所有lockName的锁
+        List<String> subNodes = zk.getChildren(path, false);
+        List<String> lockObjects = new ArrayList<>();
+        for (String node : subNodes) {
+            String _node = node.split(SPLIT_STR)[0];
+            if (_node.equals(LOCK_NAME)) {
+                lockObjects.add(node);
+            }
+        }
+        if (lockObjects.isEmpty()) {
+            logger.info("zk中没有锁 {}", currentLock);
+            // 表示zk中最后一个锁被意外删除,这种情况下对应的JVM必定已经意外退出,所以无需处理
+            return false;
+        }
+        lockObjects = lockObjects.stream().sorted().collect(Collectors.toList());
+        // 若当前节点为最小节点，则获取锁成功
+        if (currentLock.equals(lockObjects.get(0))) {
+            logger.info("获取锁 {}", currentLock);
+            return true;
+        }
+
+        //找到当前锁的索引
+        int index = Collections.binarySearch(lockObjects, currentLock);
+        if (index == -1) {
+            logger.info("zk中没有找到当前锁 {}", currentLock);
+            // 表示zk中最后一个锁被意外删除后,后续又创建新锁,这种情况下对应的JVM必定已经意外退出,所以无需处理
+            return false;
+        }
+        // 若不是最小节点，则找到自己的前一个节点
+        String waitPrevLock = lockObjects.get(index - 1);
+        Stat stat = zk.exists(path + "/" + waitPrevLock, true);
+        if (stat == null) {
+            logger.info("上个锁已释放 {}", waitPrevLock);
+            return true;
+        } else {
+            logger.info("等待上个锁释放 {}", waitPrevLock);
+        }
+        return false;
+    }
+
+    private boolean tryRelease(int releases) throws KeeperException, InterruptedException {
+        int c = getState() - releases;
+        if (!isHeldExclusively())
+            throw new IllegalMonitorStateException();
+        setState(c);
+        boolean free = false;
+        if (c == 0) {
+            String currentLock = threadLocal.get();
+            //删除当前锁
+            nodes.remove(currentLock);
+            threadLocal.remove();
+            free = true;
+            setExclusiveOwnerThread(null);
+            logger.info("释放锁 {}", currentLock);
+            zk.delete(path + "/" + currentLock, -1);
+        }
+        return free;
     }
 
     private class NodeDeletedWatcher implements Watcher {
@@ -119,161 +371,6 @@ class DistributedLock extends AbstractOwnableSynchronizer implements Lock {
                 LockSupport.unpark(firstEntry.getValue());
             }
         }
-    }
-
-    @Override
-    public void lock() {
-        while (!tryAcquire(1)) {
-            LockSupport.park(this);
-        }
-    }
-
-    @Override
-    public void lockInterruptibly() throws InterruptedException {
-        while (!tryAcquire(1)) {
-            LockSupport.park(this);
-            if (Thread.interrupted()) {
-                throw new InterruptedException();
-            }
-        }
-    }
-
-    @Override
-    public boolean tryLock() {
-        return tryAcquire(1);
-    }
-
-    @Override
-    public boolean tryLock(long time, TimeUnit unit) throws InterruptedException {
-//        while (!tryAcquire(1)){
-//            LockSupport.park(this);
-//            //如果是中断原因的话,继续剩余时间循环执行
-//            //如果不是中断原因的，
-//            if(Thread.interrupted()){
-//                //如果是中断原因的话,继续循环执行
-//            }
-//        }
-        throw new UnsupportedOperationException("Codition not support");
-    }
-
-    @Override
-    public void unlock() {
-        tryRelease(1);
-    }
-
-
-    private boolean tryAcquire(int acquires) {
-        int c = getState();
-        if (isHeldExclusively()) {
-            // 这里是实现重入锁的关键.
-            int nextc = c + acquires;
-            if (nextc < 0)
-                throw new Error("Maximum lock count exceeded");
-            setState(nextc);
-            return true;
-        } else if (c == 0) {
-            // try to acquire normally
-            if (tryMultijVMAcquire() && compareAndSetState(0, acquires)) {
-                setExclusiveOwnerThread(Thread.currentThread());
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 看当前节点是否可以获取到锁
-     *
-     * @return
-     */
-    private boolean tryMultijVMAcquire() {
-        try {
-            Thread currentThread = Thread.currentThread();
-            String currentLock = threadLocal.get();
-            if (currentLock == null ||
-                    !nodes.containsKey(currentLock)) {// 表示threadLocal中存储的lock已经过期,需要重新创建锁
-                //如果当前线程没有创建过节点的话,就创建一个lock节点.
-                currentLock = zk.create(ROOT_LOCK + "/" + LOCK_NAME + SPLIT_STR, new byte[0],
-                        ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
-
-                currentLock = currentLock.substring(currentLock.lastIndexOf("/") + 1);
-                threadLocal.set(currentLock);
-                nodes.put(currentLock, currentThread);
-                logger.info("创建锁 {}", currentLock);
-            }
-
-            // 获取取所有子节点,取出所有lockName的锁
-            List<String> subNodes = zk.getChildren(ROOT_LOCK, false);
-            List<String> lockObjects = new ArrayList<>();
-            for (String node : subNodes) {
-                String _node = node.split(SPLIT_STR)[0];
-                if (_node.equals(LOCK_NAME)) {
-                    lockObjects.add(node);
-                }
-            }
-            if (lockObjects.isEmpty()) {
-                logger.info("zk中没有锁 {}", currentLock);
-                // 表示zk中最后一个锁被意外删除,这种情况下对应的JVM必定已经意外退出,所以无需处理
-                return false;
-            }
-            lockObjects = lockObjects.stream().sorted().collect(Collectors.toList());
-            // 若当前节点为最小节点，则获取锁成功
-            if (currentLock.equals(lockObjects.get(0))) {
-                logger.info("获取锁 {}", currentLock);
-                return true;
-            }
-
-            //找到当前锁的索引
-            int index = Collections.binarySearch(lockObjects, currentLock);
-            if (index == -1) {
-                logger.info("zk中没有找到当前锁 {}", currentLock);
-                // 表示zk中最后一个锁被意外删除后,后续又创建新锁,这种情况下对应的JVM必定已经意外退出,所以无需处理
-                return false;
-            }
-            // 若不是最小节点，则找到自己的前一个节点
-            String waitPrevLock = lockObjects.get(index - 1);
-            Stat stat = zk.exists(ROOT_LOCK + "/" + waitPrevLock, true);
-            if (stat == null) {
-                logger.info("上个锁已释放 {}", waitPrevLock);
-                return true;
-            } else {
-                logger.info("等待上个锁释放 {}", waitPrevLock);
-            }
-        } catch (KeeperException | InterruptedException e) {
-            logger.info("获取锁异常1");
-            e.printStackTrace();
-        } catch (Throwable e) {
-            logger.info("获取锁异常2");
-            e.printStackTrace();
-        }
-        return false;
-    }
-
-    private boolean tryRelease(int releases) {
-        int c = getState() - releases;
-        if (!isHeldExclusively())
-            throw new IllegalMonitorStateException();
-        setState(c);
-        boolean free = false;
-        if (c == 0) {
-            try {
-                String currentLock = threadLocal.get();
-                //删除当前锁
-                nodes.remove(currentLock);
-                threadLocal.remove();
-                free = true;
-                setExclusiveOwnerThread(null);
-                logger.info("释放锁 {}", currentLock);
-                zk.delete(ROOT_LOCK + "/" + currentLock, -1);
-            } catch (InterruptedException | KeeperException e) {
-                logger.info("释放锁异常1");
-                e.printStackTrace();
-            } catch (Throwable e) {
-                logger.info("释放锁异常2");
-                e.printStackTrace();
-            }
-        }
-        return free;
     }
 
     private boolean isHeldExclusively() {
