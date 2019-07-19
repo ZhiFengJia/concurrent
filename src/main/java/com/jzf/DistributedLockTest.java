@@ -106,7 +106,10 @@ public class DistributedLockTest {
 }
 
 /**
- * 可重入,独占的,公平的,基于ZK中间件的分布式锁
+ * 可重入,独占的,公平的,基于ZooKeeper的分布式锁
+ *
+ * @author Jia ZhiFeng <312290710@qq.com>
+ * @date 2019/7/18 14:53:12
  */
 class DistributedLock extends AbstractOwnableSynchronizer implements Lock {
     private static final Logger logger = LoggerFactory.getLogger(DistributedLock.class);
