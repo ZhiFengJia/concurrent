@@ -29,7 +29,7 @@ public class DistributedLockTest {
     /**
      * 需要测试多少次加解锁操作
      */
-    private static final int LOCK_NUMBER = 1000;
+    private static final int LOCK_NUMBER = 10000;
     /**
      * ZK服务器地址
      */
@@ -62,14 +62,13 @@ public class DistributedLockTest {
             threadPoolExecutor.execute(() -> {
                 try {
                     lock.acquire();
-//                    lock.lock();// 测试锁可重入特性
+//                    lock.acquire();// 测试锁可重入特性
                     logger.info("count={}", --count);
                 } catch (Exception e) {
                     e.printStackTrace();
                 } finally {
-//                    lock.unlock();
-//                    lock.unlock();
                     try {
+//                        lock.release();
                         lock.release();
                     } catch (Exception e) {
                         e.printStackTrace();
@@ -238,19 +237,19 @@ class DistributedLock extends AbstractOwnableSynchronizer implements Lock {
     }
 
     /**
-     * Alias unlock();
-     */
-    public void release() throws KeeperException, InterruptedException {
-        tryRelease(1);
-    }
-
-    /**
      * Alias lock();
      */
     public void acquire() throws KeeperException, InterruptedException {
         while (!tryAcquire(1)) {
             LockSupport.park(this);
         }
+    }
+
+    /**
+     * Alias unlock();
+     */
+    public void release() throws KeeperException, InterruptedException {
+        tryRelease(1);
     }
 
     private boolean tryAcquire(int acquires) throws KeeperException, InterruptedException {
