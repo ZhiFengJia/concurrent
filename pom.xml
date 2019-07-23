@@ -34,23 +34,19 @@
             </exclusions>
         </dependency>
         <!--基于ZK的分布式互斥锁-->
+        <!-- https://mvnrepository.com/artifact/org.apache.curator/curator-recipes -->
         <dependency>
             <groupId>org.apache.curator</groupId>
             <artifactId>curator-recipes</artifactId>
-            <version>2.11.1</version>
+            <version>4.2.0</version>
         </dependency>
+        <!--日志框架实现-->
         <!-- https://mvnrepository.com/artifact/ch.qos.logback/logback-classic -->
         <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
             <version>1.2.3</version>
         </dependency>
-        <!-- https://mvnrepository.com/artifact/org.slf4j/slf4j-api -->
-        <!--        <dependency>-->
-        <!--            <groupId>org.slf4j</groupId>-->
-        <!--            <artifactId>slf4j-api</artifactId>-->
-        <!--            <version>1.7.26</version>-->
-        <!--        </dependency>-->
 
         <dependency>
             <groupId>junit</groupId>
