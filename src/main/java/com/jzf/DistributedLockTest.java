@@ -33,7 +33,7 @@ public class DistributedLockTest {
     /**
      * ZK服务器地址
      */
-    private static final String ZK_SERVER = "192.168.2.14:2101,192.168.2.14:2102,192.168.2.14:2103";
+    private static final String ZK_SERVER = "172.19.225.13:2101,172.19.225.13:2102,172.19.225.13:2103";
     /**
      * 每次加解锁时count-1,程序执行完count=0表示正常
      */
